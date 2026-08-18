@@ -16,6 +16,9 @@ const PORT = process.env.PORT || 3000;
 const AUTO_REPLY_MESSAGE =
   'أهلاً بك في وكالة باور أوف ميديا! كراً لتواصلك معنا، سنسعد بخدمتك قريباً.';
 
+// Cache to prevent duplicate replies to the same message ID
+const processedMessageIds = new Set();
+
 // Health check endpoint
 app.get('/', (req, res) => {
   res.status(200).send('Power of Media WhatsApp Webhook is live and healthy!');
@@ -46,52 +49,90 @@ app.post('/webhook', async (req, res) => {
 
   // Verify that this is a WhatsApp API payload
   if (body.object === 'whatsapp_business_account') {
-    // Acknowledge receipt to Meta immediately (prevents duplicate retries)
-    res.status(200).send('EVENT_RECEIVED');
-
     try {
-      const entry = body.entry?.[0];
-      const change = entry?.changes?.[0];
-      const value = change?.value;
-      const messages = value?.messages;
+      const entries = body.entry || [];
+      for (const entry of entries) {
+        const changes = entry.changes || [];
+        for (const change of changes) {
+          const value = change?.value;
+          if (!value) continue;
 
-      if (messages && messages.length > 0) {
-        const message = messages[0];
-        const from = message.from; // Customer's WhatsApp phone number
+          // Ignore message status updates (sent, delivered, read)
+          if (value.statuses) {
+            continue;
+          }
 
-        console.log(`Received WhatsApp message from ${from}:`, message.text ? message.text.body : message.type);
+          // Process incoming customer messages
+          const messages = value.messages;
+          if (messages && Array.isArray(messages) && messages.length > 0) {
+            for (const message of messages) {
+              const messageId = message.id;
 
-        // Send auto-reply via Meta Graph API v25.0
-        const graphUrl = `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`;
+              // Prevent processing duplicate webhook deliveries
+              if (messageId && processedMessageIds.has(messageId)) {
+                console.log(`Skipping duplicate message: ${messageId}`);
+                continue;
+              }
+              if (messageId) {
+                processedMessageIds.add(messageId);
+                // Keep cache size bounded
+                if (processedMessageIds.size > 1000) {
+                  const firstKey = processedMessageIds.values().next().value;
+                  processedMessageIds.delete(firstKey);
+                }
+              }
 
-        const payload = {
-          messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: from,
-          type: 'text',
-          text: {
-            preview_url: false,
-            body: AUTO_REPLY_MESSAGE,
-          },
-        };
+              // Safely extract sender's phone number
+              const from = message.from || value.contacts?.[0]?.wa_id;
+              if (!from) {
+                console.warn('Could not extract valid sender phone number (from), skipping:', JSON.stringify(message));
+                continue;
+              }
 
-        const response = await axios.post(graphUrl, payload, {
-          headers: {
-            Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
-            'Content-Type': 'application/json',
-          },
-        });
+              const msgContent = message.text?.body || message.type || 'non-text message';
+              console.log(`Processing incoming WhatsApp message from ${from}: ${msgContent}`);
 
-        console.log(`Auto-reply successfully sent to ${from}. Message ID:`, response.data?.messages?.[0]?.id);
+              // Send auto-reply via Meta Graph API v25.0
+              const graphUrl = `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`;
+              const payload = {
+                messaging_product: 'whatsapp',
+                recipient_type: 'individual',
+                to: from,
+                type: 'text',
+                text: {
+                  preview_url: false,
+                  body: AUTO_REPLY_MESSAGE,
+                },
+              };
+
+              try {
+                const response = await axios.post(graphUrl, payload, {
+                  headers: {
+                    Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+                    'Content-Type': 'application/json',
+                  },
+                  timeout: 15000,
+                });
+
+                console.log(`Auto-reply successfully sent to ${from}. Message ID:`, response.data?.messages?.[0]?.id);
+              } catch (sendError) {
+                console.error(
+                  `Failed to send auto-reply to ${from}:`,
+                  sendError.response ? sendError.response.data : sendError.message
+                );
+              }
+            }
+          }
+        }
       }
-    } catch (error) {
-      console.error(
-        'Failed to process incoming message or send auto-reply:',
-        error.response ? error.response.data : error.message
-      );
+    } catch (err) {
+      console.error('Error processing webhook payload:', err.message);
     }
+
+    // Acknowledge Meta AFTER completing async work to prevent Vercel container freeze
+    return res.status(200).send('EVENT_RECEIVED');
   } else {
-    res.sendStatus(404);
+    return res.sendStatus(404);
   }
 });
 
