@@ -47,6 +47,9 @@ app.get('/webhook', (req, res) => {
 app.post('/webhook', async (req, res) => {
   const body = req.body;
 
+  // Log incoming body for full transparency in Vercel logs
+  console.log('Received Webhook Body:', JSON.stringify(body));
+
   // Verify that this is a WhatsApp API payload
   if (body.object === 'whatsapp_business_account') {
     try {
@@ -57,8 +60,8 @@ app.post('/webhook', async (req, res) => {
           const value = change?.value;
           if (!value) continue;
 
-          // Ignore message status updates (sent, delivered, read)
-          if (value.statuses) {
+          // Ignore status updates (sent, delivered, read)
+          if (value.statuses && (!value.messages || value.messages.length === 0)) {
             continue;
           }
 
@@ -68,7 +71,7 @@ app.post('/webhook', async (req, res) => {
             for (const message of messages) {
               const messageId = message.id;
 
-              // Prevent processing duplicate webhook deliveries
+              // Prevent duplicate replies
               if (messageId && processedMessageIds.has(messageId)) {
                 console.log(`Skipping duplicate message: ${messageId}`);
                 continue;
@@ -82,13 +85,18 @@ app.post('/webhook', async (req, res) => {
                 }
               }
 
-              // Safely extract sender's phone number
-              const from = message.from || value.contacts?.[0]?.wa_id;
-              if (!from) {
-                console.warn('Could not extract valid sender phone number (from), skipping:', JSON.stringify(message));
+              // Extract sender phone number safely
+              const rawFrom =
+                message.from ||
+                (value.contacts && value.contacts[0]?.wa_id) ||
+                (Array.isArray(value.contacts) && value.contacts.find((c) => c.wa_id)?.wa_id);
+
+              if (!rawFrom) {
+                console.warn('Could not extract valid sender phone number (from), skipping message:', JSON.stringify(message));
                 continue;
               }
 
+              const from = String(rawFrom).trim();
               const msgContent = message.text?.body || message.type || 'non-text message';
               console.log(`Processing incoming WhatsApp message from ${from}: ${msgContent}`);
 
@@ -116,10 +124,8 @@ app.post('/webhook', async (req, res) => {
 
                 console.log(`Auto-reply successfully sent to ${from}. Message ID:`, response.data?.messages?.[0]?.id);
               } catch (sendError) {
-                console.error(
-                  `Failed to send auto-reply to ${from}:`,
-                  sendError.response ? sendError.response.data : sendError.message
-                );
+                const errorData = sendError.response ? sendError.response.data : sendError.message;
+                console.error(`Failed to send auto-reply to ${from}:`, JSON.stringify(errorData));
               }
             }
           }
@@ -129,7 +135,7 @@ app.post('/webhook', async (req, res) => {
       console.error('Error processing webhook payload:', err.message);
     }
 
-    // Acknowledge Meta AFTER completing async work to prevent Vercel container freeze
+    // Acknowledge Meta AFTER completing all async operations
     return res.status(200).send('EVENT_RECEIVED');
   } else {
     return res.sendStatus(404);
