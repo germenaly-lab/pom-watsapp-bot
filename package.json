@@ -1,0 +1,13 @@
+{
+  "name": "pom-watsapp-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp Business Cloud API Webhook for Power of Media",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.8.1",
+    "express": "^4.21.2"
+  }
+}
