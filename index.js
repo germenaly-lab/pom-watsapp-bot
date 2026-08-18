@@ -4,22 +4,100 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// Credentials & Configuration
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'pom_bot_123';
+// ==========================================
+// 1. Credentials & Configuration
+// ==========================================
+const VERIFY_TOKEN =
+  process.env.VERIFY_TOKEN ||
+  process.env.POM_VERIFY_TOKEN ||
+  'pom_verify_token';
+
 const WHATSAPP_ACCESS_TOKEN =
+  process.env.WHATSAPP_TOKEN ||
   process.env.WHATSAPP_ACCESS_TOKEN ||
   'EAAPfesgk6VcBSTMkCsQ1Dbwpgfoui864oO1PJRhM7QIPbZBnA080ELNgXq66M635W5tsbc4NyUoamJWaGDU3iIeZCpgN8kQAV6aIFLj5plIeqMoYeRWZBLdjz2buTlRhu4P6mt2PsCZBTZBQ0kGglgkoL196CXY0ZC4k5ZCggHZBZC6iGxNf1DrvIf0Nsdb8dKgZDZD';
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || '1241605315706516';
-const PORT = process.env.PORT || 3000;
 
-// Auto-reply Arabic message
-const AUTO_REPLY_MESSAGE =
-  'أهلاً بك في وكالة باور أوف ميديا! كراً لتواصلك معنا، سنسعد بخدمتك قريباً.';
+const PHONE_NUMBER_ID =
+  process.env.PHONE_NUMBER_ID ||
+  '1241605315706516';
+
+const PORT = process.env.PORT || 3000;
 
 // Cache to prevent duplicate replies to the same message ID
 const processedMessageIds = new Set();
 
-// Health check endpoint
+// ==========================================
+// 2. Arabic Text Normalization & Keyword Engine
+// ==========================================
+function normalizeArabicText(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .toLowerCase()
+    .trim()
+    // Remove Arabic Tashkeel / Diacritics
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    // Normalize Alif forms (أ, إ, آ -> ا)
+    .replace(/[أإآ]/g, 'ا')
+    // Normalize Taa Marbouta (ة -> ه)
+    .replace(/ة/g, 'ه')
+    // Normalize Yaa / Alef Maksura (ى -> ي)
+    .replace(/ى/g, 'ي')
+    // Remove extra whitespaces
+    .replace(/\s+/g, ' ');
+}
+
+// Auto-reply templates for Power of Media
+const RESPONSES = {
+  pricing:
+    '📊 *باقات وأسعار وكالة Power of Media*\n\n' +
+    'نوفر باقات تسويقية متكاملة ومصممة خصيصاً لتناسب أهداف وميزانية مشروعك:\n\n' +
+    '1️⃣ *باقة الانطلاق (Starter)*: إدارة السوشيال ميديا + تصاميم احترافية.\n' +
+    '2️⃣ *باقة النمو (Growth)*: إدارة الحملات الإعلانية (Media Buying) + صناعة المحتوى.\n' +
+    '3️⃣ *الباقة المتكاملة (Enterprise)*: تغطية شاملة (إعلانات + فيديو ريلز + تطوير هوية ومواقع).\n\n' +
+    '💬 لمعرفة تفاصيل الأسعار والعرض المخصص لمجال عملك، برجاء إرسال تفاصيل مشروعك وسيتواصل معك مستشارنا التسويقي فوراً.',
+
+  services:
+    '🚀 *خدمات وكالة Power of Media (باور أوف ميديا)*:\n\n' +
+    '✨ *إدارة الحملات الإعلانية الممولة (Media Buying)*: فيسبوك، انستجرام، تيك توك، جوجل سناب شات.\n' +
+    '✨ *صناعة وتصميم المحتوى*: بوستات تفاعلية، فيديو ريلز وموشن جرافيك.\n' +
+    '✨ *بناء وتطوير الهوية البصرية (Branding)*: شعارات وهوية تجارية كاملة.\n' +
+    '✨ *تصميم وبرمجة المواقع والمتاجر الإلكترونية*.\n' +
+    '✨ *حلول الأتمتة وبوتات المحادثة الذكية*.\n\n' +
+    'اخبرنا عن الخدمة المطلوبة لنزودك بكافة النماذج وسابقة أعمالنا.',
+
+  fallback:
+    'أهلاً بك في وكالة *Power of Media (باور أوف ميديا)*! 🌟\n\n' +
+    'شكراً لتواصلك معنا، سنسعد بخدمتك.\n\n' +
+    'يمكنك الاستفسار عن:\n' +
+    '• *الخدمات*: لمعرفة خدماتنا وسابقة أعمالنا.\n' +
+    '• *الأسعار*: للاطلاع على الباقات التسويقية المتاحة.\n\n' +
+    'أو اترك استفسارك وسيقوم فريقنا بالرد عليك في أقرب وقت.',
+};
+
+function getAutoReplyMessage(userMessageText) {
+  const normalized = normalizeArabicText(userMessageText);
+
+  // Keywords for Pricing / Packages
+  const pricingKeywords = ['سعر', 'اسعار', 'باقات', 'باقه', 'تكلفه', 'كم سعر', 'pricing', 'price'];
+  if (pricingKeywords.some((keyword) => normalized.includes(keyword))) {
+    return RESPONSES.pricing;
+  }
+
+  // Keywords for Services / Portfolio
+  const servicesKeywords = ['خدمات', 'خدمه', 'شغل', 'اعمال', 'تسويق', 'اعلانات', 'سوشيال', 'services'];
+  if (servicesKeywords.some((keyword) => normalized.includes(keyword))) {
+    return RESPONSES.services;
+  }
+
+  // Default Fallback
+  return RESPONSES.fallback;
+}
+
+// ==========================================
+// 3. Express Routes
+// ==========================================
+
+// Root health check
 app.get('/', (req, res) => {
   res.status(200).send('Power of Media WhatsApp Webhook is live and healthy!');
 });
@@ -31,11 +109,11 @@ app.get('/webhook', (req, res) => {
   const challenge = req.query['hub.challenge'];
 
   if (mode && token) {
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    if (mode === 'subscribe' && (token === VERIFY_TOKEN || token === 'pom_bot_123' || token === 'pom_verify_token')) {
       console.log('WEBHOOK_VERIFIED successfully with Meta.');
       return res.status(200).send(challenge);
     } else {
-      console.warn('Webhook verification failed: token mismatch.');
+      console.warn(`Webhook verification failed: token mismatch (received: ${token})`);
       return res.sendStatus(403);
     }
   }
@@ -71,14 +149,13 @@ app.post('/webhook', async (req, res) => {
             for (const message of messages) {
               const messageId = message.id;
 
-              // Prevent duplicate replies
+              // Prevent duplicate replies (idempotency check)
               if (messageId && processedMessageIds.has(messageId)) {
-                console.log(`Skipping duplicate message: ${messageId}`);
+                console.log(`Skipping duplicate message ID: ${messageId}`);
                 continue;
               }
               if (messageId) {
                 processedMessageIds.add(messageId);
-                // Keep cache size bounded
                 if (processedMessageIds.size > 1000) {
                   const firstKey = processedMessageIds.values().next().value;
                   processedMessageIds.delete(firstKey);
@@ -92,15 +169,20 @@ app.post('/webhook', async (req, res) => {
                 (Array.isArray(value.contacts) && value.contacts.find((c) => c.wa_id)?.wa_id);
 
               if (!rawFrom) {
-                console.warn('Could not extract valid sender phone number (from), skipping message:', JSON.stringify(message));
+                console.warn('Could not extract valid sender phone number (from), skipping:', JSON.stringify(message));
                 continue;
               }
 
               const from = String(rawFrom).trim();
-              const msgContent = message.text?.body || message.type || 'non-text message';
-              console.log(`Processing incoming WhatsApp message from ${from}: ${msgContent}`);
+              const messageText = message.text?.body || '';
+              const messageType = message.type || 'non-text';
 
-              // Send auto-reply via Meta Graph API v25.0
+              console.log(`Incoming WhatsApp message from ${from} [type: ${messageType}]: "${messageText}"`);
+
+              // Select tailored response based on keyword engine
+              const replyText = getAutoReplyMessage(messageText);
+
+              // Dispatch response via Meta Graph API v25.0
               const graphUrl = `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`;
               const payload = {
                 messaging_product: 'whatsapp',
@@ -109,7 +191,7 @@ app.post('/webhook', async (req, res) => {
                 type: 'text',
                 text: {
                   preview_url: false,
-                  body: AUTO_REPLY_MESSAGE,
+                  body: replyText,
                 },
               };
 
@@ -122,10 +204,10 @@ app.post('/webhook', async (req, res) => {
                   timeout: 15000,
                 });
 
-                console.log(`Auto-reply successfully sent to ${from}. Message ID:`, response.data?.messages?.[0]?.id);
+                console.log(`Auto-reply sent to ${from}. Message ID:`, response.data?.messages?.[0]?.id);
               } catch (sendError) {
                 const errorData = sendError.response ? sendError.response.data : sendError.message;
-                console.error(`Failed to send auto-reply to ${from}:`, JSON.stringify(errorData));
+                console.error(`Failed to dispatch auto-reply to ${from}:`, JSON.stringify(errorData));
               }
             }
           }
@@ -135,14 +217,16 @@ app.post('/webhook', async (req, res) => {
       console.error('Error processing webhook payload:', err.message);
     }
 
-    // Acknowledge Meta AFTER completing all async operations
+    // Acknowledge Meta AFTER completing async work to prevent Vercel container freeze
     return res.status(200).send('EVENT_RECEIVED');
   } else {
     return res.sendStatus(404);
   }
 });
 
-// Start local server if not running in serverless environment
+// ==========================================
+// 4. Server Initialization
+// ==========================================
 if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
